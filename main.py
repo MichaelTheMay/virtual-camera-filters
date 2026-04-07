@@ -18,6 +18,7 @@ from core.output import OutputThread
 from core.processor import ProcessorThread
 from filters.background_blur import BackgroundBlurFilter
 from filters.eye_contact import EyeContactFilter
+from filters.face_melt import FaceMeltFilter
 from gui.main_window import MainWindow
 from gui.theme import get_dark_stylesheet
 from utils.device_enumerator import enumerate_cameras
@@ -80,7 +81,8 @@ def main() -> None:
     # ------------------------------------------------------------------
     bg_blur = BackgroundBlurFilter()
     eye_contact = EyeContactFilter()
-    filters: list = [bg_blur, eye_contact]
+    face_melt = FaceMeltFilter()
+    filters: list = [bg_blur, eye_contact, face_melt]
 
     for f in filters:
         state = saved_state.get(f.name)
