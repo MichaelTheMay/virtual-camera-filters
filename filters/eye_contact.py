@@ -123,7 +123,13 @@ class EyeContactFilter(BaseFilter):
         bbox: tuple[int, int, int, int],
         iris_radius: float,
     ) -> np.ndarray:
-        """Warp the iris region by (shift_x, shift_y) pixels with tight falloff."""
+        """Warp the iris region by (shift_x, shift_y) pixels with smooth falloff.
+
+        Uses a wide Gaussian (~40% of bbox size) so the displacement tapers
+        to zero at the bounding-box edges.  No separate blend mask is needed —
+        at the borders the remap is an identity transform, making the seam
+        invisible.
+        """
         x1, y1, x2, y2 = bbox
         h, w = frame.shape[:2]
         x1, y1 = max(x1, 0), max(y1, 0)
@@ -142,13 +148,13 @@ class EyeContactFilter(BaseFilter):
         # Distance from iris center
         dist_sq = (grid_x - iris_center[0]) ** 2 + (grid_y - iris_center[1]) ** 2
 
-        # Tight Gaussian falloff centered on the iris — sigma = iris_radius
-        # This keeps the warp localised to the iris and doesn't distort eyelids
-        sigma = max(iris_radius, 3.0)
+        # Wide Gaussian: sigma = 40% of the eye bbox size so the warp
+        # spreads naturally across the whole eye and tapers to ~0 at edges.
+        sigma = max(region_w, region_h) * 0.4
         weight = np.exp(-dist_sq / (2.0 * sigma * sigma))
 
-        # For cv2.remap: map tells where to *sample from*.
-        # To move the iris in the +shift direction, we sample from -shift.
+        # remap maps tell where to *sample from*.
+        # To shift the iris in the +shift direction, sample from -shift offset.
         map_x = (grid_x + shift_x * weight).astype(np.float32)
         map_y = (grid_y + shift_y * weight).astype(np.float32)
 
@@ -157,27 +163,9 @@ class EyeContactFilter(BaseFilter):
             borderMode=cv2.BORDER_REPLICATE,
         )
 
-        # Soft circular blend mask centered on the iris (not the bbox center)
-        iris_local_x = iris_center[0] - x1
-        iris_local_y = iris_center[1] - y1
-        local_cols = np.arange(region_w, dtype=np.float32)
-        local_rows = np.arange(region_h, dtype=np.float32)
-        lx, ly = np.meshgrid(local_cols, local_rows)
-        local_dist = np.sqrt((lx - iris_local_x) ** 2 + (ly - iris_local_y) ** 2)
-
-        # Blend radius slightly larger than iris
-        blend_r = sigma * 1.8
-        blend_mask = np.clip(1.0 - (local_dist / blend_r), 0.0, 1.0)
-        blend_mask = cv2.GaussianBlur(blend_mask, (5, 5), sigmaX=0)
-        blend_3ch = np.stack([blend_mask] * 3, axis=-1)
-
+        # Paste directly — Gaussian weight ≈ 0 at edges so no seam.
         output = frame.copy()
-        roi = output[y1:y2, x1:x2].astype(np.float32)
-        warped_f = warped_region[y1:y2, x1:x2].astype(np.float32) if warped_region.shape[0] > region_h else warped_region.astype(np.float32)
-        # warped_region from remap is already the right size
-        warped_f = warped_region.astype(np.float32)
-        blended = warped_f * blend_3ch + roi * (1.0 - blend_3ch)
-        output[y1:y2, x1:x2] = blended.astype(np.uint8)
+        output[y1:y2, x1:x2] = warped_region
 
         return output
 
