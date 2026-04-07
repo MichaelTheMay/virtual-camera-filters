@@ -7,6 +7,7 @@ import mediapipe as mp
 import numpy as np
 
 from filters.base import BaseFilter
+from utils.model_downloader import get_model_path
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +48,14 @@ class BackgroundBlurFilter(BaseFilter):
             param_type="int",
         )
 
-        # Initialise MediaPipe selfie segmentation once
-        self._selfie_seg = mp.solutions.selfie_segmentation.SelfieSegmentation(
-            model_selection=1,
+        # Initialise MediaPipe selfie segmentation (tasks API)
+        model_path = get_model_path("selfie_segmenter")
+        options = mp.tasks.vision.ImageSegmenterOptions(
+            base_options=mp.tasks.BaseOptions(model_asset_path=model_path),
+            output_confidence_masks=True,
+            running_mode=mp.tasks.vision.RunningMode.IMAGE,
         )
+        self._segmenter = mp.tasks.vision.ImageSegmenter.create_from_options(options)
 
     # ------------------------------------------------------------------
 
@@ -64,8 +69,14 @@ class BackgroundBlurFilter(BaseFilter):
 
             # MediaPipe expects RGB
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            result = self._selfie_seg.process(rgb)
-            raw_mask = result.segmentation_mask  # float32, [0..1]
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            result = self._segmenter.segment(mp_image)
+
+            # confidence_masks[0] is the person mask
+            raw_mask = result.confidence_masks[0].numpy_view()
+            # Squeeze if needed (may be h,w,1)
+            if raw_mask.ndim == 3:
+                raw_mask = raw_mask[:, :, 0]
 
             # Binary threshold
             threshold: float = self._params["threshold"]["value"]

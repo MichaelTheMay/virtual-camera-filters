@@ -220,8 +220,7 @@ def main() -> None:
         if processor_thread is None:
             return
         try:
-            with processor_thread.lock:
-                frame = processor_thread.processed_frame
+            frame = processor_thread.processed_frame
             if frame is not None:
                 pixmap = frame_to_qpixmap(frame)
                 window.set_preview(pixmap)

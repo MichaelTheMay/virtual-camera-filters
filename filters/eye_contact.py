@@ -1,4 +1,4 @@
-"""Eye contact correction filter using MediaPipe Face Mesh."""
+"""Eye contact correction filter using MediaPipe Face Landmarker."""
 
 import logging
 from typing import Optional
@@ -8,6 +8,7 @@ import mediapipe as mp
 import numpy as np
 
 from filters.base import BaseFilter
+from utils.model_downloader import get_model_path
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +54,14 @@ class EyeContactFilter(BaseFilter):
             param_type="int",
         )
 
-        # Initialise MediaPipe Face Mesh once
-        self._face_mesh = mp.solutions.face_mesh.FaceMesh(
-            refine_landmarks=True,
-            max_num_faces=1,
-            static_image_mode=False,
+        # Initialise MediaPipe Face Landmarker (tasks API)
+        model_path = get_model_path("face_landmarker")
+        options = mp.tasks.vision.FaceLandmarkerOptions(
+            base_options=mp.tasks.BaseOptions(model_asset_path=model_path),
+            num_faces=1,
+            running_mode=mp.tasks.vision.RunningMode.IMAGE,
         )
+        self._landmarker = mp.tasks.vision.FaceLandmarker.create_from_options(options)
 
         # Temporal smoothing state
         self._prev_landmarks: Optional[np.ndarray] = None
@@ -115,11 +118,7 @@ class EyeContactFilter(BaseFilter):
         target_center: np.ndarray,
         bbox: tuple[int, int, int, int],
     ) -> np.ndarray:
-        """Warp an eye region so the iris moves toward *target_center*.
-
-        Uses cv2.remap with a radial displacement field localised to the
-        iris neighbourhood.
-        """
+        """Warp an eye region so the iris moves toward *target_center*."""
         x1, y1, x2, y2 = bbox
         h, w = frame.shape[:2]
         x2 = min(x2, w)
@@ -134,31 +133,28 @@ class EyeContactFilter(BaseFilter):
         dx = target_center[0] - iris_center[0]
         dy = target_center[1] - iris_center[1]
 
-        # Build coordinate grids for the region
-        map_x = np.zeros((region_h, region_w), dtype=np.float32)
-        map_y = np.zeros((region_h, region_w), dtype=np.float32)
-
-        # Radius of influence — roughly half the eye bounding box width
+        # Radius of influence
         radius = max(region_w, region_h) / 2.0
 
-        for row in range(region_h):
-            for col in range(region_w):
-                abs_x = col + x1
-                abs_y = row + y1
-                dist = np.sqrt(
-                    (abs_x - iris_center[0]) ** 2
-                    + (abs_y - iris_center[1]) ** 2
-                )
-                # Gaussian-like falloff
-                weight = np.exp(-(dist ** 2) / (2.0 * (radius / 2.0) ** 2))
-                map_x[row, col] = abs_x - dx * weight
-                map_y[row, col] = abs_y - dy * weight
+        # Build coordinate grids for the region (vectorised)
+        cols = np.arange(region_w, dtype=np.float32) + x1
+        rows = np.arange(region_h, dtype=np.float32) + y1
+        grid_x, grid_y = np.meshgrid(cols, rows)
+
+        dist = np.sqrt(
+            (grid_x - iris_center[0]) ** 2
+            + (grid_y - iris_center[1]) ** 2
+        )
+        weight = np.exp(-(dist ** 2) / (2.0 * (radius / 2.0) ** 2))
+
+        map_x = (grid_x - dx * weight).astype(np.float32)
+        map_y = (grid_y - dy * weight).astype(np.float32)
 
         warped_region = cv2.remap(
             frame, map_x, map_y, interpolation=cv2.INTER_LINEAR
         )
 
-        # Blend back using a soft mask so edges are seamless
+        # Blend back using a soft elliptical mask
         blend_mask = np.zeros((region_h, region_w), dtype=np.float32)
         cv2.ellipse(
             blend_mask,
@@ -193,14 +189,15 @@ class EyeContactFilter(BaseFilter):
         try:
             h, w = frame.shape[:2]
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = self._face_mesh.process(rgb)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            result = self._landmarker.detect(mp_image)
 
-            if not results.multi_face_landmarks:
+            if not result.face_landmarks:
                 self._prev_landmarks = None
                 return frame
 
-            face_lm = results.multi_face_landmarks[0]
-            pts = self._landmarks_to_array(face_lm.landmark, h, w)
+            face_lm = result.face_landmarks[0]
+            pts = self._landmarks_to_array(face_lm, h, w)
             pts = self._smooth_landmarks(pts)
 
             strength: float = self._params["strength"]["value"]
@@ -213,12 +210,10 @@ class EyeContactFilter(BaseFilter):
                 (RIGHT_IRIS, RIGHT_EYE_CONTOUR),
             ]:
                 iris_c = self._iris_center(pts, iris_ids)
-                # Target: shift iris horizontally toward image centre
                 target = iris_c.copy()
                 target[0] += (image_center_x - iris_c[0]) * strength
 
                 bbox = self._eye_bounding_box(pts, contour_ids)
-                # Clamp bbox to frame
                 bbox = (
                     max(bbox[0], 0),
                     max(bbox[1], 0),
