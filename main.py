@@ -7,6 +7,7 @@ virtual-camera output via v4l2loopback.
 
 import logging
 import os
+import signal
 import sys
 
 import numpy as np
@@ -156,6 +157,9 @@ def main() -> None:
             if thread is not None:
                 try:
                     thread.stop()
+                    thread.join(timeout=2.0)
+                    if thread.is_alive():
+                        logger.warning("%s thread did not stop within timeout", label)
                 except Exception:
                     logger.exception("Error stopping %s thread", label)
 
@@ -258,6 +262,14 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 10. Show window and run
     # ------------------------------------------------------------------
+
+    # Let Ctrl+C in the terminal trigger a clean Qt quit
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    # Qt won't process Unix signals unless the event loop wakes up periodically
+    timer = __import__("PyQt6.QtCore", fromlist=["QTimer"]).QTimer()
+    timer.start(200)
+    timer.timeout.connect(lambda: None)
+
     window.show()
     sys.exit(app.exec())
 
